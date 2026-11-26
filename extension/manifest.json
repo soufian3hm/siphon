@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Siphon",
+  "version": "0.3.0",
+  "description": "Hands downloads and media streams to the Siphon download manager.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnxFAwScIUk5L8WrAx4nJSLaMPrNuZD5/4qJFBGhksaADqiAyRBjKx8GjMsODXbKhubEEJUXulLAMaGaJFUgFrkfv9gus8zYTKXr5vcEtCcK9LUMIgXhJ3zi8Ypduxzd8vp1BTVdHxkplqNKGPivuU3XgZlcr6ytvbhc2iLwx6AqFEcXuorvXd7x1+TevowQs/YIvfeLaNpcVK3pbkaREBBNHL729tu4Se1tK/3hzBZ+GbaCLZwQSvchFtDYQSQXiOuHg0YwmyQPDy2lLnkQhatvqLGVS34Qdm5JQHjbvXNLaVLZxOu5lsCFF3pa/p+EhAJS9JCdQjMD8+De2IqlRnQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "webRequest",
+    "storage",
+    "contextMenus",
+    "cookies",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Siphon",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

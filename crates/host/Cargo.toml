@@ -1,0 +1,11 @@
+[package]
+name = "siphon-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Native-messaging host: the bridge between the browser extension and Siphon."
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+siphon-core = { path = "../core" }

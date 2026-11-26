@@ -1,0 +1,11 @@
+[package]
+name = "siphon-testserver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "A deliberately misbehaving HTTP server for exercising the Siphon engine."
+
+[dependencies]
+parking_lot = "0.13.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }

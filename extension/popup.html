@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>Siphon</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="head">
+      <img class="mark" src="icons/128.png" width="28" height="28" alt="" />
+      <div class="head-text">
+        <h1>Siphon</h1>
+        <p id="status" class="status" data-state="loading"><span class="dot" aria-hidden="true"></span><span id="status-text">Checking…</span></p>
+      </div>
+      <button id="open" class="key" type="button" disabled>Open</button>
+    </header>
+
+    <section id="notice" class="notice" hidden>
+      <strong id="notice-title"></strong>
+      <span id="notice-body"></span>
+    </section>
+
+    <section class="rows" aria-label="Preferences">
+      <label class="row">
+        <span class="row-text">
+          <span class="row-title">Capture downloads</span>
+          <span class="row-detail">Downloads you start go to Siphon instead of the browser.</span>
+        </span>
+        <input id="enabled" class="switch" type="checkbox" role="switch" disabled />
+      </label>
+      <label class="row">
+        <span class="row-text">
+          <span class="row-title">Find media on pages</span>
+          <span class="row-detail">List videos, audio and streams as pages load them.</span>
+        </span>
+        <input id="sniff" class="switch" type="checkbox" role="switch" disabled />
+      </label>
+      <label class="row" id="site-row" hidden>
+        <span class="row-text">
+          <span class="row-title" id="site-title">Capture on this site</span>
+          <span class="row-detail">Off leaves this site&rsquo;s downloads to the browser.</span>
+        </span>
+        <input id="site" class="switch" type="checkbox" role="switch" disabled />
+      </label>
+      <details class="more">
+        <summary>More options</summary>
+        <label class="row">
+          <span class="row-text">
+            <span class="row-title">Download button on videos</span>
+            <span class="row-detail">Shown by the player when a video or stream is found.</span>
+          </span>
+          <input id="video-button" class="switch" type="checkbox" role="switch" disabled />
+        </label>
+        <label class="row">
+          <span class="row-text">
+            <span class="row-title">Leave small files to the browser</span>
+            <span class="row-detail">Files below this size are not captured.</span>
+          </span>
+          <select id="min-size" class="field" disabled>
+            <option value="0">Off</option>
+            <option value="100">100 KB</option>
+            <option value="1024">1 MB</option>
+            <option value="5120">5 MB</option>
+            <option value="20480">20 MB</option>
+          </select>
+        </label>
+        <label class="row stacked">
+          <span class="row-text">
+            <span class="row-title">Types left to the browser</span>
+            <span class="row-detail">Extensions separated by spaces. Hold Alt while clicking to leave one download to the browser.</span>
+          </span>
+          <input id="skip-types" class="field wide" type="text" placeholder="pdf jpg png" spellcheck="false" autocomplete="off" disabled />
+        </label>
+      </details>
+    </section>
+
+    <section class="media" aria-labelledby="media-title">
+      <div class="section-title">
+        <h2 id="media-title">On this page</h2>
+        <span id="media-count" class="count"></span>
+      </div>
+      <ul id="media-list" class="list" aria-live="polite">
+        <li class="skeleton" aria-hidden="true"><span></span><span></span></li>
+        <li class="skeleton" aria-hidden="true"><span></span><span></span></li>
+      </ul>
+      <p id="media-empty" class="empty" hidden>Nothing found yet. Start playback and streams show up here.</p>
+    </section>
+
+    <footer class="foot">
+      <button id="grab" class="key wide" type="button" disabled>Grab all links on this page&hellip;</button>
+      <p id="grab-note" class="foot-note" hidden></p>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

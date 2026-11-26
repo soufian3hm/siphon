@@ -1,0 +1,15 @@
+[package]
+name = "siphon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Siphon: a fast, segmented download manager."
+
+[dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+open = "5.4.5"
+rfd = "0.18.0"
+siphon-core = { path = "../core" }
+url = "2.5.9"
