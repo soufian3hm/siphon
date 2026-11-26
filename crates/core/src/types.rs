@@ -59,11 +59,22 @@ pub struct Request {
     /// `Authorization`, `User-Agent`, ...). Names are case-insensitive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
+    /// The address is a page with a player on it, not a file: the browser
+    /// saw the video there. Such a page is read by the video helper even
+    /// when its address alone would not say so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub page: bool,
 }
 
 impl Request {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), referer: None, headers: Vec::new() }
+        Self { url: url.into(), referer: None, headers: Vec::new(), page: false }
+    }
+
+    /// Marks the address as a page with a video on it.
+    pub fn as_page(mut self) -> Self {
+        self.page = true;
+        self
     }
 
     pub fn with_referer(mut self, referer: impl Into<String>) -> Self {
@@ -86,7 +97,8 @@ impl Request {
     }
 
     pub fn protocol(&self) -> Protocol {
-        Protocol::detect(&self.url)
+        let web = self.url.trim().get(..4).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"));
+        if self.page && web { Protocol::Page } else { Protocol::detect(&self.url) }
     }
 }
 

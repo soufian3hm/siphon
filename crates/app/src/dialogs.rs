@@ -276,6 +276,8 @@ impl AddDialog {
         if let Some(name) = capture.suggested_name.as_deref().filter(|n| !n.trim().is_empty()) {
             dialog.name = siphon_core::filename::sanitize(name);
         }
+        // A quality already chosen by the player in the browser.
+        dialog.variant = capture.variant.clone();
         dialog.capture = Some(capture);
         dialog.provisional = provisional;
         dialog
@@ -436,7 +438,7 @@ impl AddDialog {
             Some(title) => format!("From your browser  \u{00B7}  {title}"),
             None => "Sent by your browser".to_owned(),
         });
-        let is_page = Protocol::detect(self.url.trim()) == Protocol::Page;
+        let is_page = self.request().protocol() == Protocol::Page;
         let title = match &self.capture {
             _ if is_page => "Save this video",
             Some(c) if c.media => "Save this stream",
@@ -545,6 +547,7 @@ impl AddDialog {
                         .variants
                         .iter()
                         .map(|v| match v.size {
+                            Some(size) if v.size_estimated => format!("{}  \u{00B7}  {}  \u{00B7}  \u{2248} {}", v.label, v.detail, format::bytes(size)),
                             Some(size) => format!("{}  \u{00B7}  {}  \u{00B7}  {}", v.label, v.detail, format::bytes(size)),
                             None => format!("{}  \u{00B7}  {}", v.label, v.detail),
                         })
@@ -1548,6 +1551,15 @@ impl SettingsDialog {
                 self.draft.video_quality = shown;
             }
         });
+        widgets::setting_row(
+            ui,
+            "Use the browser\u{2019}s login for video pages",
+            "A site that will not show a video to a visitor who is not signed in is read again with the cookies your browser handed over for that page. Never for YouTube.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut self.draft.page_login);
+            },
+        );
         widgets::setting_row(ui, if cfg!(target_os = "macos") { "Keep the Mac awake" } else { "Keep the computer awake" }, "Hold off sleep while downloads are running.", 40.0, |ui| {
             widgets::toggle(ui, &mut self.draft.keep_awake);
         });

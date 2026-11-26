@@ -14,15 +14,19 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use siphon_core::Capture;
 use siphon_core::grab::LinkBatch;
-use siphon_core::ipc::{self, Message, SendError};
+use siphon_core::ipc::{self, Message, Reply, SendError};
+use siphon_core::{Capture, Request};
 
 /// The browser never sends more than this to a host.
 const MAX_INCOMING: usize = 64 * 1024 * 1024;
 /// And accepts no more than this from one.
 const MAX_OUTGOING: usize = 1024 * 1024;
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the application is given for an ordinary answer, and for one
+/// that has it read a video page first.
+const PATIENCE: Duration = Duration::from_secs(5);
+const PAGE_PATIENCE: Duration = Duration::from_secs(100);
 
 #[derive(Deserialize)]
 struct Incoming {
@@ -36,6 +40,9 @@ struct Incoming {
     /// The links of a page, for the application's link picker.
     #[serde(default)]
     links: Option<LinkBatch>,
+    /// A video page to describe.
+    #[serde(default)]
+    request: Option<Request>,
 }
 
 fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
@@ -117,12 +124,12 @@ fn launch() -> Result<(), String> {
 }
 
 /// Delivers a message, starting the application when it is not running.
-fn deliver(message: &Message, start_if_needed: bool) -> Result<String, String> {
+fn deliver(message: &Message, start_if_needed: bool, patience: Duration) -> Result<Reply, String> {
     let dir = data_dir();
-    match ipc::send(&dir, message) {
+    match ipc::send_within(&dir, message, patience) {
         Ok(reply) => {
             show(&reply);
-            return Ok(reply.version.unwrap_or_default());
+            return Ok(reply);
         }
         Err(SendError::NotRunning) if start_if_needed => {}
         Err(e) => return Err(e.to_string()),
@@ -132,8 +139,8 @@ fn deliver(message: &Message, start_if_needed: bool) -> Result<String, String> {
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
     loop {
         std::thread::sleep(Duration::from_millis(150));
-        match ipc::send(&dir, message) {
-            Ok(reply) => return Ok(reply.version.unwrap_or_default()),
+        match ipc::send_within(&dir, message, patience) {
+            Ok(reply) => return Ok(reply),
             Err(SendError::NotRunning) if Instant::now() < deadline => {}
             Err(SendError::NotRunning) => return Err("Siphon did not start in time".into()),
             Err(e) => return Err(e.to_string()),
@@ -147,8 +154,8 @@ fn handle(incoming: Incoming) -> Value {
         // "Is the application there?" must not start it: the extension asks
         // on every browser launch.
         "ping" => {
-            return match deliver(&Message::Ping, false) {
-                Ok(version) => json!({ "id": id, "ok": true, "running": true, "version": version }),
+            return match deliver(&Message::Ping, false, PATIENCE) {
+                Ok(reply) => json!({ "id": id, "ok": true, "running": true, "version": reply.version.unwrap_or_default() }),
                 Err(_) => json!({
                     "id": id,
                     "ok": true,
@@ -158,38 +165,52 @@ fn handle(incoming: Incoming) -> Value {
             };
         }
         "capture" => match incoming.capture {
-            Some(capture) if !capture.request.url.trim().is_empty() => deliver(&Message::Capture { capture }, true),
+            Some(capture) if !capture.request.url.trim().is_empty() => deliver(&Message::Capture { capture }, true, PATIENCE),
             _ => Err("the capture has no address".into()),
         },
         "links" => match incoming.links {
-            Some(batch) if !batch.links.is_empty() => deliver(&Message::Links { batch }, true),
+            Some(batch) if !batch.links.is_empty() => deliver(&Message::Links { batch }, true, PATIENCE),
             _ => Err("there are no links to hand over".into()),
         },
-        "raise" => deliver(&Message::Raise, true),
+        // The application reads the page; its answer is the qualities.
+        "describe" => match incoming.request {
+            Some(request) if !request.url.trim().is_empty() => deliver(&Message::Describe { request }, true, PAGE_PATIENCE),
+            _ => Err("there is no page to describe".into()),
+        },
+        "raise" => deliver(&Message::Raise, true, PATIENCE),
         other => Err(format!("unknown request \"{other}\"")),
     };
     match result {
-        Ok(version) => json!({ "id": id, "ok": true, "version": version }),
+        Ok(reply) => json!({ "id": id, "ok": true, "version": reply.version.unwrap_or_default(), "page": reply.page }),
         Err(error) => json!({ "id": id, "ok": false, "error": error }),
     }
 }
 
 fn main() {
     let stdin = io::stdin();
-    let stdout = io::stdout();
     let mut input = stdin.lock();
-    let mut output = stdout.lock();
+    // Answers are written whole, one at a time, in whatever order they are
+    // ready: each carries the id of its request.
+    let output = std::sync::Arc::new(std::sync::Mutex::new(io::stdout()));
 
     // A closed pipe or a malformed frame both mean the browser is done with us.
     while let Ok(Some(body)) = read_message(&mut input) {
-        let reply = match serde_json::from_slice::<Incoming>(&body) {
-            Ok(incoming) => handle(incoming),
-            Err(e) => json!({ "ok": false, "error": format!("malformed request: {e}") }),
-        };
-        if write_message(&mut output, &reply).is_err() {
-            break;
-        }
+        let output = output.clone();
+        // Each request on its own thread: describing a page takes seconds,
+        // and a click made meanwhile must not wait behind it.
+        std::thread::spawn(move || {
+            let reply = match serde_json::from_slice::<Incoming>(&body) {
+                Ok(incoming) => handle(incoming),
+                Err(e) => json!({ "ok": false, "error": format!("malformed request: {e}") }),
+            };
+            let mut output = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if write_message(&mut *output, &reply).is_err() {
+                // The browser is gone; so are we.
+                std::process::exit(0);
+            }
+        });
     }
+    // The pipe closed. Requests still being answered have nobody to answer.
 }
 
 #[cfg(test)]
@@ -264,13 +285,15 @@ mod tests {
 
     #[test]
     fn unknown_requests_are_answered_not_fatal() {
-        let reply = handle(Incoming { id: json!(3), kind: "dance".into(), capture: None, links: None });
+        let reply = handle(Incoming { id: json!(3), kind: "dance".into(), capture: None, links: None, request: None });
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["id"], 3);
-        let reply = handle(Incoming { id: Value::Null, kind: "capture".into(), capture: None, links: None });
+        let reply = handle(Incoming { id: Value::Null, kind: "capture".into(), capture: None, links: None, request: None });
         assert_eq!(reply["ok"], false);
-        let reply = handle(Incoming { id: Value::Null, kind: "links".into(), capture: None, links: Some(LinkBatch::default()) });
+        let reply = handle(Incoming { id: Value::Null, kind: "links".into(), capture: None, links: Some(LinkBatch::default()), request: None });
         assert_eq!(reply["ok"], false);
+        let reply = handle(Incoming { id: json!("d1"), kind: "describe".into(), capture: None, links: None, request: None });
+        assert_eq!((reply["ok"].clone(), reply["id"].clone()), (json!(false), json!("d1")));
     }
 
     #[test]

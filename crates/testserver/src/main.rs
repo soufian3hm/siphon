@@ -103,6 +103,65 @@ async fn main() {
             "text/html; charset=utf-8",
         ),
     );
+    // A feed of posts, each with a player that has no file address of its
+    // own (it plays from memory, as players on large sites do) and a date
+    // that links to the post. The files behind each post, in two sizes, are
+    // what a video helper would report for it.
+    let mut feed = String::from(
+        "<!doctype html><meta charset=utf-8><title>Field notes: the feed</title>\
+         <body style=\"font:15px system-ui;margin:0 auto;max-width:620px;padding:24px;background:#f4f4f5\">",
+    );
+    for (n, (author, words)) in [("Ada Lovelace", "First light over the ridge"), ("Grace Hopper", "The harbour at noon"), ("Katherine Johnson", "Launch day, from the roof")].iter().enumerate() {
+        let n = n + 1;
+        feed.push_str(&format!(
+            "<article id=\"post-{n}\" style=\"background:#fff;border:1px solid #ddd;border-radius:10px;padding:16px;margin:0 0 20px\">\
+             <header><a rel=\"author\" href=\"/people/{n}\">{author}</a> · <a href=\"/post/{n}\"><time datetime=\"2026-11-2{n}\">Nov 2{n}</time></a></header>\
+             <p>{words}</p><video id=\"video-{n}\" width=\"560\" height=\"315\" muted style=\"background:#111;display:block;width:560px;height:315px\"></video></article>"
+        ));
+        server.route(&format!("/post/{n}"), Route::bytes(format!("<!doctype html><title>{words}</title><p>{words}</p>"), "text/html; charset=utf-8"));
+        server.route(&format!("/media/feed/{n}/720.mp4"), Route::pattern((n as u64 + 2) * MIB, 240 + n as u64).content_type("video/mp4"));
+        server.route(&format!("/media/feed/{n}/360.mp4"), Route::pattern(n as u64 * 300 * 1024, 250 + n as u64).content_type("video/mp4"));
+    }
+    feed.push_str("<script>for (const v of document.querySelectorAll('video')) v.src = URL.createObjectURL(new MediaSource());</script>");
+    server.route("/feed", Route::bytes(feed, "text/html; charset=utf-8"));
+
+    // A stand-in built the way X marks up its posts, for the rule by which
+    // the extension finds a post's own address there. A test browser is told
+    // to resolve that site's name to this server.
+    let memory_players = "<script>for (const v of document.querySelectorAll('video')) v.src = URL.createObjectURL(new MediaSource());</script>";
+    let player = |id: &str| format!("<div data-testid=\"videoPlayer\"><div data-testid=\"videoComponent\"><video id=\"{id}\" muted style=\"background:#111;display:block;width:480px;height:270px\"></video></div></div>");
+    server.route(
+        "/replica/x",
+        Route::bytes(
+            format!(
+                "<!doctype html><meta charset=utf-8><title>Home / X</title><body style=\"font:15px system-ui;margin:24px\">\
+                 <article data-testid=\"tweet\"><div data-testid=\"User-Name\"><span>Ada Lovelace</span> <a href=\"/ada/status/1790000000000000001\"><time datetime=\"2026-11-20\">Nov 20</time></a></div>\
+                 <div data-testid=\"tweetText\">One clip</div>{}</article>\
+                 <article data-testid=\"tweet\"><div data-testid=\"User-Name\"><span>Grace Hopper</span> <a href=\"/grace/status/1790000000000000002\"><time datetime=\"2026-11-21\">Nov 21</time></a></div>\
+                 <div data-testid=\"tweetText\">Two clips in one post</div>{}{}</article>\
+                 <article data-testid=\"tweet\"><div data-testid=\"User-Name\"><span>Promoted</span></div><div data-testid=\"tweetText\">An advertisement has no address of its own</div>{}</article>{memory_players}",
+                player("x-1"),
+                player("x-2a"),
+                player("x-2b"),
+                player("x-ad"),
+            ),
+            "text/html; charset=utf-8",
+        ),
+    );
+    // A player that keeps its video inside a shadow tree, in a post whose
+    // date links to the post: what a site built from web components does.
+    server.route(
+        "/replica/shadow",
+        Route::bytes(
+            "<!doctype html><meta charset=utf-8><title>Components</title><body style=\"font:15px system-ui;margin:24px\">\
+             <article><header><a rel=\"author\" href=\"/people/9\">Mary Jackson</a> · <a href=\"/post/9\"><time datetime=\"2026-11-23\">Nov 23</time></a></header><p>Wind tunnel, first run</p>\
+             <fancy-player id=\"shadow-player\" style=\"display:block;width:480px;height:270px\"></fancy-player></article>\
+             <script>const outer = document.getElementById('shadow-player').attachShadow({ mode: 'open' }); const inner = document.createElement('fancy-surface'); outer.append(inner);\
+             const v = document.createElement('video'); v.muted = true; v.style.cssText = 'background:#111;display:block;width:480px;height:270px'; v.src = URL.createObjectURL(new MediaSource()); inner.attachShadow({ mode: 'open' }).append(v);</script>",
+            "text/html; charset=utf-8",
+        ),
+    );
+
     // Small files for the capture rules (Alt held, a type left alone, a site left alone).
     for name in ["kept-by-alt.txt", "kept-by-type.txt", "kept-by-site.bin"] {
         server.route(&format!("/rules/{name}"), Route::pattern(200 * 1024, 230));
@@ -123,6 +182,7 @@ async fn main() {
     page.push_str("<a id=\"members\" href=\"/members/Field-Recordings-Vol-3.flac\" download>members/Field-Recordings-Vol-3.flac <small>(needs the login ada / lovelace)</small></a>");
     page.push_str("<a id=\"gallery\" href=\"/gallery/\">gallery <small>(a page of photos, for the link grabber)</small></a>");
     page.push_str("<a id=\"clip\" href=\"/clip\">clip <small>(a page with a video element)</small></a>");
+    page.push_str("<a id=\"feed\" href=\"/feed\">feed <small>(posts with a video each, for the button's quality menu)</small></a>");
     for name in ["kept-by-alt.txt", "kept-by-type.txt", "kept-by-site.bin"] {
         page.push_str(&format!("<a id=\"{name}\" href=\"/rules/{name}\" download>rules/{name}</a>"));
     }

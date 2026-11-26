@@ -29,6 +29,6 @@ pub mod types;
 pub mod zip_peek;
 
 pub use error::{Error, ErrorClass, Result};
-pub use manager::{Capture, Confirmation, Details, DownloadView, Duplicate, Event, GrabJob, HashJob, Manager, NewDownload, ProbeInfo, QueueState, Ticket, VariantInfo};
+pub use manager::{Capture, Confirmation, Details, DownloadView, Duplicate, Event, GrabJob, HashJob, Manager, NewDownload, PageInfo, ProbeInfo, QueueState, Ticket, VariantInfo};
 pub use settings::Settings;
 pub use types::*;

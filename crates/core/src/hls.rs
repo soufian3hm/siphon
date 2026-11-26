@@ -63,6 +63,9 @@ pub struct HlsPlan {
     audio: Option<Track>,
     pub resolution: Option<(u64, u64)>,
     pub bandwidth: Option<u64>,
+    /// The picture qualities the stream comes in (1080, 720, ...), best
+    /// first. Empty when the address was one rendition, not a master list.
+    pub qualities: Vec<u32>,
     /// Segments are fragmented MP4 rather than MPEG-TS.
     fragmented_mp4: bool,
     ffmpeg: Option<PathBuf>,
@@ -79,6 +82,10 @@ impl HlsPlan {
     }
 
     /// The extension the finished file will really have.
+    pub fn container(&self) -> &'static str {
+        self.extension()
+    }
+
     fn extension(&self) -> &'static str {
         if self.fragmented_mp4 || self.ffmpeg.is_some() { "mp4" } else { "ts" }
     }
@@ -176,8 +183,20 @@ fn resolve(base: &str, reference: &str) -> Result<String> {
     base.join(reference.trim()).map(|u| u.to_string()).map_err(|e| Error::InvalidUrl(format!("{reference}: {e}")))
 }
 
-/// Reads the playlist(s) and decides what will be downloaded.
+/// Reads the playlist(s) and decides what will be downloaded: the best
+/// picture the stream has.
 pub async fn plan(client: &reqwest::Client, request: &Request) -> Result<HlsPlan> {
+    plan_for(client, request, None).await
+}
+
+/// The quality a rendition is named by: the short side of its picture.
+fn quality_of(variant: &m3u8_rs::VariantStream) -> u32 {
+    variant.resolution.map(|r| r.width.min(r.height) as u32).unwrap_or(0)
+}
+
+/// Like [`plan`], for a chosen quality: the best rendition not above it, or
+/// the smallest there is when all are above.
+pub async fn plan_for(client: &reqwest::Client, request: &Request, quality: Option<u32>) -> Result<HlsPlan> {
     let (text, base) = fetch_text(client, request, request.url.trim()).await?;
     let playlist = m3u8_rs::parse_playlist_res(text.as_bytes())
         .map_err(|_| Error::Protocol("the address did not return a valid HLS playlist".into()))?;
@@ -185,17 +204,24 @@ pub async fn plan(client: &reqwest::Client, request: &Request) -> Result<HlsPlan
     let mut resolution = None;
     let mut bandwidth = None;
     let mut audio = None;
+    let mut qualities = Vec::new();
 
     let (media, media_url) = match playlist {
         Playlist::MediaPlaylist(media) => (media, base),
         Playlist::MasterPlaylist(master) => {
-            // Best picture first, then best bitrate.
-            let variant = master
-                .variants
-                .iter()
-                .filter(|v| !v.is_i_frame && !v.uri.trim().is_empty())
-                .max_by_key(|v| (v.resolution.map(|r| r.height).unwrap_or(0), v.bandwidth))
-                .ok_or_else(|| Error::Protocol("the playlist lists no playable stream".into()))?;
+            let playable = || master.variants.iter().filter(|v| !v.is_i_frame && !v.uri.trim().is_empty());
+            qualities = playable().map(quality_of).filter(|q| *q > 0).collect();
+            qualities.sort_unstable_by(|a, b| b.cmp(a));
+            qualities.dedup();
+            let variant = match quality {
+                Some(wanted) => playable()
+                    .filter(|v| quality_of(v) <= wanted)
+                    .max_by_key(|v| (quality_of(v), v.bandwidth))
+                    .or_else(|| playable().min_by_key(|v| (quality_of(v), v.bandwidth))),
+                // Best picture first, then best bitrate.
+                None => playable().max_by_key(|v| (v.resolution.map(|r| r.height).unwrap_or(0), v.bandwidth)),
+            }
+            .ok_or_else(|| Error::Protocol("the playlist lists no playable stream".into()))?;
             resolution = variant.resolution.map(|r| (r.width, r.height));
             bandwidth = Some(variant.bandwidth);
 
@@ -240,6 +266,7 @@ pub async fn plan(client: &reqwest::Client, request: &Request) -> Result<HlsPlan
         audio,
         resolution,
         bandwidth,
+        qualities,
         fragmented_mp4,
         ffmpeg: find_ffmpeg(),
     })
@@ -734,6 +761,7 @@ mod tests {
             audio: None,
             resolution: Some((1920, 1080)),
             bandwidth: None,
+            qualities: Vec::new(),
             fragmented_mp4: false,
             ffmpeg: ffmpeg.then(|| PathBuf::from("/usr/bin/ffmpeg")),
         };

@@ -63,6 +63,9 @@ pub struct Settings {
     /// The picture height chosen first for video pages; a page that does not
     /// have it gets the best one below.
     pub video_quality: u32,
+    /// A video page that refuses to be read logged out is read again with
+    /// the cookies the browser handed over for it. Never for YouTube.
+    pub page_login: bool,
     /// The browser setup screen has been shown once.
     pub browser_setup_seen: bool,
     pub net: NetConfig,
@@ -91,6 +94,7 @@ impl Default for Settings {
             on_complete: String::new(),
             notify_on_complete: true,
             video_quality: 1080,
+            page_login: true,
             browser_setup_seen: false,
             net: NetConfig::default(),
         }

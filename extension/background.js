@@ -16,6 +16,8 @@
 
 const HOST = "app.siphon.host";
 const REQUEST_TIMEOUT_MS = 25_000;
+/** Reading a video page takes the application a few seconds, sometimes many. */
+const DESCRIBE_TIMEOUT_MS = 110_000;
 const MAX_MEDIA_PER_TAB = 40;
 
 const DEFAULTS = Object.freeze({
@@ -93,7 +95,7 @@ function connect() {
 }
 
 /** Sends one request to the host and resolves with its reply. */
-function ask(message) {
+function ask(message, patience = REQUEST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let channel;
     try {
@@ -106,7 +108,7 @@ function ask(message) {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error("Siphon did not answer in time."));
-    }, REQUEST_TIMEOUT_MS);
+    }, patience);
     pending.set(id, { resolve, reject, timer });
     try {
       channel.postMessage({ ...message, id });
@@ -126,10 +128,34 @@ async function hostStatus() {
   try {
     const reply = await ask({ type: "ping" });
     lastHostError = "";
+    if (reply.running) followUpdate(reply.version);
     return { installed: true, running: Boolean(reply.running), version: reply.version };
   } catch (error) {
     return { installed: false, running: false, error: lastHostError || String(error?.message ?? error) };
   }
+}
+
+/**
+ * Siphon keeps the folder this extension was loaded from up to date. When the
+ * application is newer than the copy the browser has in memory, the extension
+ * loads itself again from that folder: once per version, so a copy loaded
+ * from somewhere Siphon does not update cannot loop.
+ */
+async function followUpdate(appVersion) {
+  const numbers = (version) => String(version ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const [app, mine] = [numbers(appVersion), numbers(chrome.runtime.getManifest().version)];
+  let newer = false;
+  for (let i = 0; i < Math.max(app.length, mine.length); i++) {
+    if ((app[i] ?? 0) !== (mine[i] ?? 0)) {
+      newer = (app[i] ?? 0) > (mine[i] ?? 0);
+      break;
+    }
+  }
+  if (!newer) return;
+  const stored = await chrome.storage.local.get("reloadedFor");
+  if (stored.reloadedFor === appVersion) return;
+  await chrome.storage.local.set({ reloadedFor: appVersion });
+  chrome.runtime.reload();
 }
 
 // ---------------------------------------------------------------- captures --
@@ -166,6 +192,36 @@ function isVideoPage(url) {
   }
 }
 
+/** YouTube is read logged out, always: its public videos need no account. */
+function isYouTube(url) {
+  return /^(youtube\.com|youtube-nocookie\.com|youtu\.be)$/.test(hostOf(url).replace(/^(www|m|music)\./, ""));
+}
+
+/**
+ * The request for a page with a video on it. The browser's cookies for the
+ * page go along (never YouTube's): the application reads the page logged out
+ * and only falls back on them when the site refuses that.
+ */
+async function pageRequest(url, referer) {
+  const headers = [["User-Agent", navigator.userAgent]];
+  const cookie = isYouTube(url) ? "" : await cookieHeader(url);
+  if (cookie) headers.push(["Cookie", cookie]);
+  return { url, referer: referer || undefined, headers, page: true };
+}
+
+/** What Siphon found behind a page, kept briefly: the menu is opened twice. */
+const described = new Map();
+
+async function describePage(url, referer) {
+  const kept = described.get(url);
+  if (kept && Date.now() - kept.at < 180_000) return kept.page;
+  const reply = await ask({ type: "describe", request: await pageRequest(url, referer) }, DESCRIBE_TIMEOUT_MS);
+  if (!reply.ok || !reply.page) throw new Error(reply.error || "Siphon could not read this page.");
+  described.set(url, { at: Date.now(), page: reply.page });
+  if (described.size > 60) described.delete(described.keys().next().value);
+  return reply.page;
+}
+
 /** The cookies the browser would send to `url`, as a `Cookie` header value. */
 async function cookieHeader(url) {
   if (!/^https?:/i.test(url)) return "";
@@ -189,22 +245,30 @@ async function tabInfo(tabId) {
 
 /**
  * Builds the message the application understands.
- * @param {{url: string, referer?: string, name?: string, size?: number, mime?: string, title?: string, media?: boolean}} what
+ * @param {{url: string, referer?: string, name?: string, size?: number, mime?: string, title?: string, media?: boolean, page?: boolean, variant?: string}} what
  */
 async function buildCapture(what) {
-  const headers = [["User-Agent", navigator.userAgent]];
-  // A video page is read afresh by the application, logged out. The user's
-  // session with that site is not needed for it and is not handed over.
-  const page = isVideoPage(what.url);
-  const cookie = page ? "" : await cookieHeader(what.url);
-  if (cookie) headers.push(["Cookie", cookie]);
+  // A page with a video on it: said so by the page script, which saw the
+  // player, or plain from the address.
+  const page = Boolean(what.page) || isVideoPage(what.url);
+  let request;
+  if (page) {
+    request = await pageRequest(what.url, what.referer);
+  } else {
+    const headers = [["User-Agent", navigator.userAgent]];
+    const cookie = await cookieHeader(what.url);
+    if (cookie) headers.push(["Cookie", cookie]);
+    request = { url: what.url, referer: what.referer || undefined, headers };
+  }
   return {
-    request: { url: what.url, referer: what.referer || undefined, headers },
+    request,
     suggested_name: what.name || undefined,
     size: Number.isFinite(what.size) && what.size > 0 ? Math.round(what.size) : undefined,
     mime: what.mime || undefined,
     page_title: what.title || undefined,
     media: Boolean(what.media) || page,
+    // The quality chosen by the player, when one was.
+    variant: what.variant || undefined,
   };
 }
 
@@ -379,8 +443,20 @@ async function describePlaylist(url) {
     if (!text.trimStart().startsWith("#EXTM3U")) return null;
     const lines = text.split(/\r?\n/);
     const variants = [];
+    const qualities = new Set();
     let height = 0;
     for (let i = 0; i < lines.length; i++) {
+      // Sound and subtitles delivered as playlists of their own are part of
+      // the same stream, not streams to offer.
+      if (lines[i].startsWith("#EXT-X-MEDIA") || lines[i].startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+        const part = /URI="([^"]+)"/.exec(lines[i])?.[1];
+        try {
+          if (part) variants.push(new URL(part, url).href);
+        } catch {
+          /* not an address */
+        }
+        continue;
+      }
       if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue;
       const target = lines.slice(i + 1).find((line) => line.trim() && !line.startsWith("#"));
       if (!target) continue;
@@ -389,9 +465,15 @@ async function describePlaylist(url) {
       } catch {
         continue;
       }
-      height = Math.max(height, Number(/RESOLUTION=\d+x(\d+)/.exec(lines[i])?.[1] ?? 0));
+      const size = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]);
+      if (size) {
+        height = Math.max(height, Number(size[2]));
+        // A quality is named by the picture's short side.
+        qualities.add(Math.min(Number(size[1]), Number(size[2])));
+      }
     }
-    return { variants, height, live: variants.length === 0 && !text.includes("#EXT-X-ENDLIST") };
+    const master = variants.length > 0;
+    return { variants, height, qualities: [...qualities].sort((a, b) => b - a), live: !master && !text.includes("#EXT-X-ENDLIST") };
   } catch {
     return null;
   }
@@ -407,7 +489,8 @@ function rememberMedia(tabId, entry) {
       const info = await describePlaylist(entry.url);
       if (info) {
         entry.variants = info.variants;
-        entry.quality = info.height > 0 ? `${info.height}p` : "";
+        entry.qualities = info.qualities;
+        entry.quality = info.qualities[0] ? `${info.qualities[0]}p` : info.height > 0 ? `${info.height}p` : "";
         entry.live = info.live;
       }
     }
@@ -593,6 +676,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const media = sender.tab?.id !== undefined ? await mediaFor(sender.tab.id) : [];
         return { media, videoButton: config.sniffMedia && config.videoButton };
       }
+      // From the page script: what does the page of this video offer?
+      case "describe": {
+        if (!/^https?:\/\//i.test(message.url ?? "")) throw new Error("That is not a page.");
+        return { page: await describePage(message.url, message.referer) };
+      }
       case "grab": {
         const tabId = Number.isInteger(message.tabId) ? message.tabId : (await activeTab())?.id;
         if (tabId === undefined) throw new Error("There is no page to read.");
@@ -618,11 +706,21 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const tab = await tabInfo(Number.isInteger(message.tabId) ? message.tabId : sender.tab?.id);
         // A stream has no file name of its own; the page title is the best one.
         const isStream = message.kind === "hls" || message.kind === "dash";
-        const title = (tab.title ?? "").replace(/[\\/:*?"<>|]+/g, " ").trim();
+        const page = Boolean(message.page) || message.kind === "page";
+        // What the page script made of the post, else the tab's title.
+        const clean = (name) => (name ?? "").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+        const [given, tabTitle] = [clean(message.name), clean(tab.title)];
+        let name;
+        if (page) name = undefined; // named by the application once it has read the page
+        else if (isStream) name = given || tabTitle ? `${given || tabTitle}.mp4` : undefined;
+        else if (given) name = /\.[a-z0-9]{2,5}$/i.test(given) ? given : `${given}.${extensionOf(message.url) || "mp4"}`;
         await sendCapture({
           url: message.url,
-          referer: message.kind === "page" ? undefined : tab.url,
-          name: isStream && title ? `${title}.mp4` : undefined,
+          page,
+          variant: message.variant,
+          // A player inside another site's page answers to that page.
+          referer: page ? message.referer : tab.url,
+          name,
           size: message.size,
           mime: message.mime,
           title: tab.title,

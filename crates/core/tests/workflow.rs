@@ -16,7 +16,7 @@ use siphon_core::secrets::Secrets;
 use siphon_core::segments::StealPolicy;
 use siphon_core::transfer::Tuning;
 use siphon_core::types::{DownloadId, Request, Status};
-use siphon_core::{Capture, Confirmation, DownloadView, Error, Event, Manager, NewDownload, Settings};
+use siphon_core::{Capture, Confirmation, DownloadView, Error, Event, Manager, NewDownload, Protocol, Settings};
 use siphon_testserver::{Route, TestServer, pattern, verify_file};
 
 const MIB: u64 = 1024 * 1024;
@@ -962,7 +962,20 @@ fn fake_resolver(dir: &Path) -> PathBuf {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nif [ -f '{0}/error.txt' ]; then cat '{0}/error.txt' >&2; exit 1; fi\necho \"$@\" >> '{0}/calls.txt'\ncat '{0}/page.json'\n",
+            concat!(
+                "#!/bin/sh\n",
+                "if [ -f '{0}/error.txt' ]; then cat '{0}/error.txt' >&2; exit 1; fi\n",
+                "echo \"$@\" >> '{0}/calls.txt'\n",
+                // With `login.txt` in place the page is only described to a
+                // caller that brings cookies, as some sites insist.
+                "if [ -f '{0}/login.txt' ]; then\n",
+                "  jar=''; prev=''\n",
+                "  for arg in \"$@\"; do if [ \"$prev\" = '--cookies' ]; then jar=\"$arg\"; fi; prev=\"$arg\"; done\n",
+                "  if [ -z \"$jar\" ]; then echo 'ERROR: [Reddit] abc123: Account authentication is required. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies' >&2; exit 1; fi\n",
+                "  cp \"$jar\" '{0}/seen-cookies.txt'\n",
+                "fi\n",
+                "cat '{0}/page.json'\n",
+            ),
             dir.display()
         ),
     )
@@ -1111,6 +1124,196 @@ fn a_video_page_carries_on_when_its_addresses_expire_and_says_why_when_it_cannot
     let lost = fx.manager.add(NewDownload::new(Request::new("https://www.youtube.com/watch?v=nohelper001")));
     let failed = fx.wait(lost, "the failure", |v| matches!(v.status, Status::Failed { .. }));
     assert!(matches!(&failed.status, Status::Failed { message, .. } if message.contains("could not be started")), "{:?}", failed.status);
+    fx.done();
+}
+
+/// A file with picture and sound in one, as sites without separate streams
+/// hand out: no codec names, no stated size.
+fn whole(id: &str, width: u32, height: u32, url: &str) -> serde_json::Value {
+    serde_json::json!({ "format_id": id, "ext": "mp4", "protocol": "https", "width": width, "height": height, "tbr": 800, "url": url })
+}
+
+#[cfg(unix)]
+#[test]
+fn a_quality_chosen_by_the_player_is_the_one_that_downloads() {
+    let fx = Fixture::new("page-choice");
+    let tools = fx.root.join("tools");
+    fx.manager.set_resolver_for_tests(fake_resolver(&tools));
+    fx.server.route("/media/720.mp4", Route::pattern(300 * 1024, 170).content_type("video/mp4"));
+    fx.server.route("/media/360.mp4", Route::pattern(50 * 1024, 171).content_type("video/mp4"));
+    let page = serde_json::json!({
+        "title": "A phone that does it all https://t.example/abc", "uploader": "Val Phone", "extractor_key": "Facebook", "duration": 12,
+        "formats": [whole("hd", 1280, 720, &fx.server.url("/media/720.mp4")), whole("sd", 640, 360, &fx.server.url("/media/360.mp4"))],
+    });
+    std::fs::write(tools.join("page.json"), page.to_string()).unwrap();
+
+    // A post's address says nothing about a video being on it: the browser,
+    // which saw the player, says so.
+    let post = Request::new(fx.server.url("/someone/posts/3?ref=feed&utm_source=share")).with_referer("https://site.example/feed").as_page();
+    assert_eq!(post.protocol(), Protocol::Page);
+    assert_eq!(Request::new(post.url.clone()).protocol(), Protocol::Http);
+
+    // What the menu by the player is told.
+    let info = fx.server_runtime.block_on(fx.manager.describe_page(&post)).unwrap();
+    assert_eq!(info.name, "Val Phone - A phone that does it all", "who posted it and what they wrote, without the link");
+    assert_eq!(info.variants.iter().map(|v| (v.id.as_str(), v.label.as_str(), v.container.as_str())).collect::<Vec<_>>(), vec![("720", "720p", "mp4"), ("360", "360p", "mp4")]);
+    assert_eq!(info.default.as_deref(), Some("720"));
+    assert_eq!(info.duration, Some(12));
+    assert!(info.variants.iter().all(|v| v.size_estimated && v.size == Some(1_200_000)), "800 kbit/s for 12 s, said to be an estimate: {:?}", info.variants);
+
+    // The user picks the smaller one there; that is what starts, at once.
+    fx.manager.capture(Capture { request: post.clone(), page_title: Some("Feed".into()), media: true, variant: Some("360".into()), ..Default::default() });
+    let mut seen = Vec::new();
+    let id = match fx.event(&mut seen, "the capture", |e| matches!(e, Event::Captured { .. })) {
+        Event::Captured { provisional, capture } => {
+            assert_eq!(capture.variant.as_deref(), Some("360"));
+            provisional.expect("a video page starts ahead like anything else")
+        }
+        _ => unreachable!(),
+    };
+    let done = fx.wait(id, "completion", completed);
+    assert_eq!(done.protocol, Protocol::Page);
+    assert_eq!(done.variant.as_deref(), Some("360"));
+    assert_eq!(done.total, Some(50 * 1024), "the real size, asked of the server, replaces the estimate");
+    assert_eq!(done.file_name, "Val Phone - A phone that does it all.mp4");
+    assert!(done.url.ends_with("/someone/posts/3"), "how the visitor got there is not part of the address: {}", done.url);
+    verify_file(&done.path(), 171, 50 * 1024).unwrap();
+    assert_eq!(fx.server.stats("/media/720.mp4").requests, 0, "the quality that was not chosen is never touched");
+    assert_eq!(std::fs::read_to_string(tools.join("calls.txt")).unwrap().lines().count(), 1, "the menu and the download read the page once between them");
+
+    // The dialog offers the same choices, and the list knows the address
+    // however it is written.
+    assert_eq!(fx.manager.variants(id).len(), 2);
+    fx.manager.confirm(id, Confirmation::default()).unwrap();
+    assert_eq!(fx.manager.duplicate_of(&fx.server.url("/someone/posts/3?utm_source=other")).map(|d| d.id), Some(id));
+    fx.done();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_page_that_wants_a_login_is_read_again_with_the_browsers_cookies() {
+    let fx = Fixture::new("page-login");
+    let tools = fx.root.join("tools");
+    fx.manager.set_resolver_for_tests(fake_resolver(&tools));
+    fx.server.route("/media/clip.mp4", Route::pattern(40 * 1024, 172).content_type("video/mp4"));
+    let page = serde_json::json!({ "title": "Wait for it", "uploader": "r/aww", "extractor_key": "Reddit", "duration": 8, "formats": [whole("fallback", 640, 360, &fx.server.url("/media/clip.mp4"))] });
+    std::fs::write(tools.join("page.json"), page.to_string()).unwrap();
+    std::fs::write(tools.join("login.txt"), "").unwrap();
+    let calls = || std::fs::read_to_string(tools.join("calls.txt")).unwrap_or_default();
+    let describe = |request: &Request| fx.server_runtime.block_on(fx.manager.describe_page(request));
+
+    // Nothing to log in with: the site's refusal is passed on, without the
+    // helper's advice about its own command line.
+    let anonymous = Request::new(fx.server.url("/r/aww/comments/1/wait")).as_page();
+    let refused = describe(&anonymous).unwrap_err().to_string();
+    assert!(refused.contains("Account authentication is required") && !refused.contains("--cookies") && !refused.contains("github.com"), "{refused}");
+    assert_eq!(calls().lines().count(), 1);
+
+    // The browser handed its cookies over: logged out first, then with them.
+    let mut member = Request::new(fx.server.url("/r/aww/comments/2/wait")).as_page();
+    member.set_header("Cookie", "reddit_session=abc123; theme=dark");
+    let info = describe(&member).unwrap();
+    assert_eq!(info.name, "r_aww - Wait for it".replace('_', "/"));
+    let log = calls();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(!lines[1].contains("--cookies"), "logged out first: {}", lines[1]);
+    assert!(lines[2].contains("--cookies "), "then with the login: {}", lines[2]);
+    let jar = std::fs::read_to_string(tools.join("seen-cookies.txt")).unwrap();
+    assert!(jar.starts_with("# Netscape HTTP Cookie File\n") && jar.contains("\treddit_session\tabc123\n") && jar.contains("\ttheme\tdark\n"), "{jar}");
+    let jar_path = lines[2].split("--cookies ").nth(1).unwrap().split(" -J").next().unwrap();
+    assert!(!Path::new(jar_path).exists(), "the cookie file does not outlive the reading: {jar_path}");
+
+    // The download carries the login the same way.
+    let id = fx.manager.add(NewDownload::new(member.clone()));
+    let done = fx.wait(id, "completion", completed);
+    verify_file(&done.path(), 172, 40 * 1024).unwrap();
+
+    // A YouTube account is never used this way.
+    let mut tube = Request::new("https://www.youtube.com/watch?v=membersonly1");
+    tube.set_header("Cookie", "SID=secret");
+    assert!(describe(&tube).is_err());
+    assert!(calls().lines().filter(|line| line.contains("membersonly1")).all(|line| !line.contains("--cookies")), "{}", calls());
+
+    // And nobody's is, once the user has said no.
+    let mut settings = fx.manager.settings();
+    settings.page_login = false;
+    fx.manager.set_settings(settings).unwrap();
+    let mut other = Request::new(fx.server.url("/r/aww/comments/3/wait")).as_page();
+    other.set_header("Cookie", "reddit_session=abc123");
+    assert!(describe(&other).is_err());
+    assert!(calls().lines().filter(|line| line.contains("/comments/3/")).all(|line| !line.contains("--cookies")));
+    fx.done();
+}
+
+#[test]
+fn a_stream_is_fetched_in_the_quality_that_was_chosen() {
+    let fx = Fixture::new("stream-choice");
+    serve_stream(&fx.server, "show/720", 4, 120 * 1024, 8 * MIB);
+    serve_stream(&fx.server, "show/360", 4, 40 * 1024, 8 * MIB);
+    let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720\n720/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\n360/index.m3u8\n";
+    fx.server.route("/show/master.m3u8", Route::bytes(master, "application/vnd.apple.mpegurl"));
+    let address = fx.server.url("/show/master.m3u8");
+
+    // The dialog learns what the stream comes in.
+    let ticket = fx.manager.probe(Request::new(address.clone()));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let info = loop {
+        if let Some(result) = ticket.take() {
+            break result.unwrap();
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(info.variants.iter().map(|v| v.label.as_str()).collect::<Vec<_>>(), vec!["720p", "360p"]);
+    assert_eq!(info.variant.as_deref(), Some("720"));
+
+    // Chosen by the player: only that rendition is fetched.
+    let id = fx.manager.add(NewDownload { request: Request::new(address.clone()), file_name: Some("Show.mp4".into()), variant: Some("360".into()), ..Default::default() });
+    let done = fx.wait(id, "completion", completed);
+    assert!(done.note.as_deref().unwrap_or("").starts_with("360p"), "{:?}", done.note);
+    assert_eq!(fx.server.stats("/show/360/seg3.ts").requests, 1);
+    assert_eq!(fx.server.stats("/show/720/seg0.ts").requests, 0, "the other quality is never touched");
+    assert_eq!(fx.manager.variants(id).len(), 2);
+
+    // A quality between two renditions takes the one below; none takes the best.
+    let between = fx.manager.add(NewDownload { request: Request::new(format!("{address}?again=1")), variant: Some("480".into()), ..Default::default() });
+    assert!(fx.wait(between, "completion", completed).note.as_deref().unwrap_or("").starts_with("360p"));
+    let best = fx.manager.add(NewDownload::new(Request::new(format!("{address}?again=2"))));
+    assert!(fx.wait(best, "completion", completed).note.as_deref().unwrap_or("").starts_with("720p"));
+    assert_eq!(fx.server.stats("/show/720/seg3.ts").requests, 1);
+    fx.done();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_page_on_a_site_that_only_streams_goes_through_the_stream_engine() {
+    let fx = Fixture::new("page-stream");
+    let tools = fx.root.join("tools");
+    fx.manager.set_resolver_for_tests(fake_resolver(&tools));
+    serve_stream(&fx.server, "talk/1080", 3, 90 * 1024, 8 * MIB);
+    serve_stream(&fx.server, "talk/480", 3, 30 * 1024, 8 * MIB);
+    let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080\n1080/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\n480/index.m3u8\n";
+    fx.server.route("/talk/master.m3u8", Route::bytes(master, "application/vnd.apple.mpegurl"));
+    let rendition = |id: &str, width: u32, height: u32| {
+        serde_json::json!({ "format_id": id, "ext": "mp4", "protocol": "m3u8_native", "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "width": width, "height": height, "tbr": 1000,
+            "url": fx.server.url(&format!("/talk/{height}/index.m3u8")), "manifest_url": fx.server.url("/talk/master.m3u8") })
+    };
+    let page = serde_json::json!({ "title": "A talk", "uploader": "Someone", "extractor_key": "Vimeo", "duration": 18, "formats": [rendition("hls-1", 1920, 1080), rendition("hls-2", 854, 480)] });
+    std::fs::write(tools.join("page.json"), page.to_string()).unwrap();
+
+    let request = Request::new("https://vimeo.com/76979871?share=copy&ref=feed");
+    assert_eq!(request.protocol(), Protocol::Page, "known by its shape, typed or pasted");
+    let info = fx.server_runtime.block_on(fx.manager.describe_page(&request)).unwrap();
+    assert_eq!(info.variants.iter().map(|v| (v.id.as_str(), v.detail.as_str())).collect::<Vec<_>>(), vec![("1080", "MP4  \u{00B7}  H.264  \u{00B7}  stream"), ("480", "MP4  \u{00B7}  H.264  \u{00B7}  stream")]);
+    assert_eq!(info.name, "A talk", "a titled video keeps its title");
+
+    let id = fx.manager.add(NewDownload { request, variant: Some("480".into()), ..Default::default() });
+    let done = fx.wait(id, "completion", completed);
+    assert!(done.file_name.starts_with("A talk."), "{}", done.file_name);
+    assert_eq!(done.variant.as_deref(), Some("480"));
+    assert_eq!(fx.server.stats("/talk/480/seg2.ts").requests, 1);
+    assert_eq!(fx.server.stats("/talk/1080/seg0.ts").requests, 0);
     fx.done();
 }
 

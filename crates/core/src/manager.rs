@@ -121,7 +121,8 @@ pub struct NewDownload {
 }
 
 /// One quality a video page offers, as shown to the user.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VariantInfo {
     pub id: String,
     /// `"1080p60"`.
@@ -129,14 +130,39 @@ pub struct VariantInfo {
     /// `"MP4 · H.264"`.
     pub detail: String,
     pub size: Option<u64>,
+    /// The size is worked out from bitrate and length, not stated by the site.
+    pub size_estimated: bool,
     /// Extension of the finished file.
     pub container: String,
 }
 
 impl From<&crate::extractor::Variant> for VariantInfo {
     fn from(variant: &crate::extractor::Variant) -> Self {
-        Self { id: variant.id.clone(), label: variant.label.clone(), detail: variant.detail.clone(), size: variant.size, container: variant.container.to_owned() }
+        Self {
+            id: variant.id.clone(),
+            label: variant.label.clone(),
+            detail: variant.detail.clone(),
+            size: variant.size,
+            size_estimated: variant.size_estimated,
+            container: variant.container.to_owned(),
+        }
     }
+}
+
+/// What a video page offers, for whoever asks before downloading it: the
+/// browser extension shows this by the player.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PageInfo {
+    /// What the file would be called, without its extension.
+    pub name: String,
+    pub uploader: Option<String>,
+    /// Length in seconds.
+    pub duration: Option<u64>,
+    /// The qualities on offer, best picture first, sound only last.
+    pub variants: Vec<VariantInfo>,
+    /// The quality taken when none is chosen.
+    pub default: Option<String>,
 }
 
 /// What the user decided about a download that was started before they
@@ -194,6 +220,9 @@ pub struct Capture {
     /// True for a media stream sniffed from a page rather than a download
     /// the user triggered.
     pub media: bool,
+    /// The quality the user already chose by the player, for a video page
+    /// or a stream that comes in several.
+    pub variant: Option<String>,
 }
 
 /// What a server said about a link, for the confirmation dialog.
@@ -443,6 +472,9 @@ struct Inner {
     secrets: Arc<Secrets>,
     /// Replaces the video helper's location in tests.
     resolver: Mutex<Option<PathBuf>>,
+    /// Video pages read a moment ago: the quality menu by the player, the
+    /// dialog and the download that follows read a page once between them.
+    pages: Mutex<HashMap<String, (Instant, Arc<crate::extractor::Resolved>)>>,
     /// Called when something wants the user's eyes: a captured link, a page
     /// of links, a request to come forward. Unlike `wake`, it must work
     /// while the window is hidden and nothing is being drawn.
@@ -531,6 +563,7 @@ impl Manager {
             bridge: Mutex::new(bridge),
             secrets: Arc::new(secrets),
             resolver: Mutex::new(None),
+            pages: Mutex::new(HashMap::new()),
             attention: Mutex::new(None),
             awake: Mutex::new(None),
             wake: Box::new(wake),
@@ -886,7 +919,6 @@ impl Manager {
 
     /// An unfinished download of exactly this URL, if there is one.
     pub fn find_by_url(&self, url: &str) -> Option<DownloadId> {
-        let url = identity(url);
         let state = self.inner.state.lock();
         state
             .order
@@ -894,15 +926,14 @@ impl Manager {
             .copied()
             .find(|id| {
                 let record = &state.items[id].record;
-                record.request.url == url && !record.status.is_finished() && !record.provisional
+                same_address(record, url) && !record.status.is_finished() && !record.provisional
             })
     }
 
     /// The newest entry of the list with exactly this address, finished or not.
     pub fn duplicate_of(&self, url: &str) -> Option<Duplicate> {
-        let url = identity(url);
         let state = self.inner.state.lock();
-        state.order.iter().filter_map(|id| state.items.get(id)).find(|item| !item.record.provisional && item.record.request.url == url).map(|item| {
+        state.order.iter().filter_map(|id| state.items.get(id)).find(|item| !item.record.provisional && same_address(&item.record, url)).map(|item| {
             let path = item.record.path();
             Duplicate {
                 id: item.record.id,
@@ -1140,6 +1171,12 @@ impl Manager {
         }
         self.inner.touch();
         self.inner.pump();
+    }
+
+    /// Reads a video page and says what it offers, without downloading
+    /// anything: for a quality menu shown before the download exists.
+    pub async fn describe_page(&self, request: &Request) -> Result<PageInfo> {
+        self.inner.describe_page(request).await
     }
 
     /// The helpers video pages need, where they were found: the resolver
@@ -1383,7 +1420,41 @@ fn view_of(item: &Item, now: Instant, settings: &Settings) -> DownloadView {
 
 /// The form of an address that downloads are compared by. A video page is
 /// the same video whatever playlist or timestamp its link carried.
-fn identity(url: &str) -> String {
+/// How long a page's description is trusted. The addresses in it live for
+/// hours; this only has to span a click on the quality menu, the dialog and
+/// the start of the download.
+const PAGE_MEMORY: Duration = Duration::from_secs(240);
+
+/// The qualities of a stream, as choices.
+fn stream_qualities(plan: &crate::hls::HlsPlan) -> Vec<VariantInfo> {
+    plan.qualities
+        .iter()
+        .map(|quality| VariantInfo {
+            id: quality.to_string(),
+            label: format!("{quality}p"),
+            detail: format!("{}  \u{00B7}  stream", plan.container().to_ascii_uppercase()),
+            size: None,
+            size_estimated: false,
+            container: plan.container().to_owned(),
+        })
+        .collect()
+}
+
+fn identity(request: &Request) -> String {
+    let url = request.url.as_str();
+    if request.page {
+        return crate::extractor::canonical(url);
+    }
+    identity_of(url)
+}
+
+/// Whether a typed or captured address is the one a record downloads. A
+/// video page is the same page however it was reached.
+fn same_address(record: &Record, url: &str) -> bool {
+    record.request.url == url || record.request.url == identity_of(url) || (record.protocol == Protocol::Page && record.request.url == crate::extractor::canonical(url))
+}
+
+fn identity_of(url: &str) -> String {
     let url = url.trim();
     if crate::extractor::is_page(url) { crate::extractor::canonical(url) } else { url.to_owned() }
 }
@@ -1548,7 +1619,7 @@ impl Inner {
         state.next_id += 1;
 
         let mut request = new.request;
-        request.url = identity(&request.url);
+        request.url = identity(&request);
         let protocol = request.protocol();
         let reserved = reserved_paths(&state, None);
         let is_reserved = |p: &Path| reserved.iter().any(|r| r == p);
@@ -1699,13 +1770,13 @@ impl Inner {
                     final_url: plan.media_url.clone(),
                     protocol,
                     note: Some(plan.describe()),
-                    variants: Vec::new(),
-                    variant: None,
+                    variants: stream_qualities(&plan),
+                    variant: plan.qualities.first().map(|quality| quality.to_string()),
                 })
             }
             Protocol::Page => {
                 let page = crate::extractor::canonical(&request.url);
-                let resolved = crate::extractor::resolve(&self.resolver()?, &page).await?;
+                let resolved = self.read_page(request, false).await?;
                 let choices = crate::extractor::variants(&resolved);
                 let preferred = self.state.lock().settings.video_quality;
                 let Some(choice) = crate::extractor::pick(&choices, None, preferred) else {
@@ -1714,7 +1785,7 @@ impl Inner {
                 let mut note = vec![choice.label.clone()];
                 note.extend(resolved.duration.map(crate::extractor::clock));
                 Ok(ProbeInfo {
-                    file_name: filename::sanitize(&format!("{}.{}", resolved.title, choice.container)),
+                    file_name: filename::sanitize(&format!("{}.{}", resolved.name(), choice.container)),
                     total: choice.size,
                     resumable: true,
                     content_type: None,
@@ -1769,8 +1840,8 @@ impl Inner {
             // The addresses behind a page live for a few hours. When they die
             // mid-transfer the page is read again, once, and what is on disk
             // carries on with the fresh ones.
-            Protocol::Page => match self.attempt_page(id, &record, &progress, tuning.clone(), cancel).await {
-                Err(Error::Expired(_)) => self.attempt_page(id, &record, &progress, tuning, cancel).await,
+            Protocol::Page => match self.attempt_page(id, &record, &progress, tuning.clone(), cancel, false).await {
+                Err(Error::Expired(_)) => self.attempt_page(id, &record, &progress, tuning, cancel, true).await,
                 other => other,
             },
         };
@@ -1835,10 +1906,15 @@ impl Inner {
         cancel: &CancellationToken,
     ) -> Result<Outcome> {
         let client = self.client()?;
+        // A quality chosen by the player or in the dialog; else the best.
+        let wanted = self.state.lock().items.get(&id).and_then(|item| item.record.variant.as_deref().and_then(|v| v.parse::<u32>().ok()));
         let plan = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            plan = crate::hls::plan(&client, &record.request) => plan?,
+            plan = crate::hls::plan_for(&client, &record.request, wanted) => plan?,
         };
+        if let Some(item) = self.state.lock().items.get_mut(&id) {
+            item.variants = stream_qualities(&plan);
+        }
         let probe = Probe {
             total: None,
             resumable: true,
@@ -1886,6 +1962,51 @@ impl Inner {
         })
     }
 
+    /// What a video page offers. A page read within the last few minutes is
+    /// not read again, unless `fresh` asks for it.
+    ///
+    /// The page is read logged out first: most videos are public, and a
+    /// login is not spent where it is not needed. Only when that is refused
+    /// and the browser handed its cookies over is it read again with them.
+    async fn read_page(&self, request: &Request, fresh: bool) -> Result<Arc<crate::extractor::Resolved>> {
+        let page = crate::extractor::canonical(&request.url);
+        {
+            let mut pages = self.pages.lock();
+            pages.retain(|_, (read, _)| read.elapsed() < PAGE_MEMORY);
+            if fresh {
+                pages.remove(&page);
+            } else if let Some((_, known)) = pages.get(&page) {
+                return Ok(known.clone());
+            }
+        }
+        let resolver = self.resolver()?;
+        let session = crate::extractor::Session::of(request);
+        let with_login = session.cookies.is_some() && crate::extractor::may_use_login(&page) && self.state.lock().settings.page_login;
+        let resolved = match crate::extractor::resolve(&resolver, &page, &session, false).await {
+            Err(Error::Protocol(_)) if with_login => crate::extractor::resolve(&resolver, &page, &session, true).await?,
+            other => other?,
+        };
+        let resolved = Arc::new(resolved);
+        self.pages.lock().insert(page, (Instant::now(), resolved.clone()));
+        Ok(resolved)
+    }
+
+    async fn describe_page(&self, request: &Request) -> Result<PageInfo> {
+        let resolved = self.read_page(request, false).await?;
+        let choices = crate::extractor::variants(&resolved);
+        if choices.is_empty() {
+            return Err(Error::Unsupported("this page offers nothing that can be saved as a file".into()));
+        }
+        let preferred = self.state.lock().settings.video_quality;
+        Ok(PageInfo {
+            name: resolved.name(),
+            uploader: resolved.uploader.clone(),
+            duration: resolved.duration,
+            default: crate::extractor::pick(&choices, None, preferred).map(|choice| choice.id.clone()),
+            variants: choices.iter().map(VariantInfo::from).collect(),
+        })
+    }
+
     /// A video page: the helper says what is behind it, the streams of the
     /// chosen quality are fetched as files, and picture and sound are joined.
     async fn attempt_page(
@@ -1895,12 +2016,14 @@ impl Inner {
         progress: &Arc<Progress>,
         tuning: Tuning,
         cancel: &CancellationToken,
+        // Read the page again even if it was read a moment ago: the
+        // addresses from that reading have stopped working.
+        fresh: bool,
     ) -> Result<Outcome> {
-        let resolver = self.resolver()?;
         let page = crate::extractor::canonical(&record.request.url);
         let resolved = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            resolved = crate::extractor::resolve(&resolver, &page) => resolved?,
+            resolved = self.read_page(&record.request, fresh) => resolved?,
         };
         let choices = crate::extractor::variants(&resolved);
         // The choice may have changed while this attempt was being set up.
@@ -1918,15 +2041,63 @@ impl Inner {
 
         let mut note = vec![choice.label.clone()];
         note.extend(resolved.duration.map(crate::extractor::clock));
+        let note = note.join("  \u{00B7}  ");
+
+        // A site that only streams: the stream engine takes the rendition
+        // of the chosen quality and assembles it, sound included.
+        if let Some(video) = choice.video.as_ref().filter(|_| choice.is_hls()) {
+            let client = self.client()?;
+            let mut stream = Request::new(video.manifest.clone().unwrap_or_else(|| video.url.clone()));
+            stream.headers = video.headers.clone();
+            let quality = Some(choice.height).filter(|height| *height > 0 && video.manifest.is_some());
+            let plan = tokio::select! {
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+                plan = crate::hls::plan_for(&client, &stream, quality) => plan?,
+            };
+            let probe = Probe {
+                total: None,
+                resumable: true,
+                validators: Default::default(),
+                content_type: Some("video/mp4".into()),
+                file_name: filename::sanitize(&format!("{}.{}", resolved.name(), plan.container())),
+                final_url: page,
+            };
+            let final_path = self.adopt_probe(id, &probe, Some(note))?;
+            self.set_status(id, Status::Downloading);
+            let inner = self.clone();
+            let on_assembling = move || inner.set_status(id, Status::Assembling);
+            return crate::hls::run(&client, plan, &final_path, tuning.connections, progress, &self.limiter, cancel, &on_assembling).await;
+        }
+
+        // Where the site did not state sizes, the servers are asked, so the
+        // list shows a real total from the start.
+        let mut total = choice.size.filter(|_| !choice.size_estimated);
+        if total.is_none() {
+            let mut sum = Some(0u64);
+            for (_, format) in choice.stages() {
+                let mut request = Request::new(format.url.clone());
+                request.headers = format.headers.clone();
+                let source = Source::Http(HttpSource::new(self.client()?, request)?);
+                let asked = tokio::select! {
+                    _ = cancel.cancelled() => return Err(Error::Cancelled),
+                    probed = source.probe() => probed,
+                };
+                sum = match (sum, asked.ok().and_then(|(probe, _)| probe.total)) {
+                    (Some(sum), Some(size)) => Some(sum + size),
+                    _ => None,
+                };
+            }
+            total = sum.filter(|sum| *sum > 0).or(choice.size);
+        }
         let probe = Probe {
-            total: choice.size,
+            total,
             resumable: true,
             validators: Default::default(),
             content_type: None,
-            file_name: filename::sanitize(&format!("{}.{}", resolved.title, choice.container)),
+            file_name: filename::sanitize(&format!("{}.{}", resolved.name(), choice.container)),
             final_url: page,
         };
-        let final_path = self.adopt_probe(id, &probe, Some(note.join("  \u{00B7}  ")))?;
+        let final_path = self.adopt_probe(id, &probe, Some(note))?;
         self.set_status(id, Status::Downloading);
 
         let joining = choice.needs_joining();
@@ -1945,15 +2116,6 @@ impl Inner {
         for (name, format) in choice.stages() {
             let target = if joining { parts.join(format!("{name}.{}", format.ext)) } else { final_path.clone() };
             files.push(target.clone());
-            // Whole already, from before a pause.
-            if joining
-                && let Ok(meta) = std::fs::metadata(&target)
-                && Some(meta.len()) == format.size
-            {
-                fetched += meta.len();
-                continue;
-            }
-            progress.begin_stage(fetched);
             let mut request = Request::new(format.url.clone());
             request.headers = format.headers.clone();
             let source = Arc::new(Source::Http(HttpSource::new(self.client()?, request)?));
@@ -1961,6 +2123,17 @@ impl Inner {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 probed = source.probe() => probed?,
             };
+            // Whole already, from before a pause. The server's own count
+            // decides: the page's may be an estimate.
+            if joining
+                && let Ok(meta) = std::fs::metadata(&target)
+                && meta.len() > 0
+                && Some(meta.len()) == probe.total.or(format.size.filter(|_| !format.size_estimated))
+            {
+                fetched += meta.len();
+                continue;
+            }
+            progress.begin_stage(fetched);
             let mut tuning = tuning.clone();
             tuning.max_request = Some(format.request_size.unwrap_or(crate::extractor::DEFAULT_REQUEST_SIZE));
             let plan = Plan { source, final_path: target, probe, body, tuning };
@@ -2347,7 +2520,7 @@ impl Inner {
                 return None;
             }
             // Already in the list: the dialog asks what to do about that.
-            let url = identity(&capture.request.url);
+            let url = identity(&capture.request);
             if state.items.values().any(|i| !i.record.provisional && i.record.request.url == url) {
                 return None;
             }
@@ -2365,6 +2538,7 @@ impl Inner {
             total: capture.size,
             content_type: capture.mime.clone(),
             provisional: true,
+            variant: capture.variant.clone(),
             ..Default::default()
         }))
     }
@@ -2373,7 +2547,7 @@ impl Inner {
         // The same address is already in the list and unfinished: one copy
         // is enough. If it had stopped, the new request (fresh cookies)
         // gets it going again.
-        let url = identity(&capture.request.url);
+        let url = identity(&capture.request);
         let existing = {
             let state = self.state.lock();
             state.order.iter().copied().find(|id| {
@@ -2408,11 +2582,13 @@ impl Inner {
             return;
         }
 
+        let page = capture.request.protocol() == Protocol::Page;
         let id = self.insert(NewDownload {
             request: capture.request,
-            file_name: capture.suggested_name.filter(|_| capture.media),
+            file_name: capture.suggested_name.filter(|_| capture.media && !page),
             total: capture.size,
             content_type: capture.mime,
+            variant: capture.variant,
             ..Default::default()
         });
         let name = self.name_of(id);

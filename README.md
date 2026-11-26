@@ -7,14 +7,15 @@
 **A fast, native download manager for macOS, written in Rust.**
 
 Segmented downloads that start the moment you click, resume after anything,<br>
-and take over from Chrome, Brave, Edge, Dia and Arc. YouTube, HLS and FTP included.
+and take over from Chrome, Brave, Edge, Dia and Arc. One button on every video,<br>
+on YouTube, X, Facebook, Instagram and Reddit, with the quality you pick.
 
 [![Latest release](https://img.shields.io/github/v/release/soufian3hm/siphon?label=release&color=4C8DFF)](https://github.com/soufian3hm/siphon/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/soufian3hm/siphon/total?color=4C8DFF)](https://github.com/soufian3hm/siphon/releases)
 ![macOS 11 or later](https://img.shields.io/badge/macOS-11%2B-1D1E22?logo=apple&logoColor=white)
 ![Apple silicon and Intel](https://img.shields.io/badge/universal-Apple%20silicon%20%2B%20Intel-1D1E22)
 ![Rust](https://img.shields.io/badge/Rust-2024%20edition-1D1E22?logo=rust&logoColor=white)
-![197 tests](https://img.shields.io/badge/tests-197%20passing-3DD68C)
+![208 tests](https://img.shields.io/badge/tests-208%20passing-3DD68C)
 
 ### [Download Siphon for macOS](https://github.com/soufian3hm/siphon/releases/latest)
 
@@ -60,7 +61,7 @@ Siphon is that way of working, built for the Mac from scratch:
 
 ## Install
 
-1. Download **`Siphon-0.3.0.dmg`** from the
+1. Download **`Siphon-0.4.0.dmg`** from the
    [latest release](https://github.com/soufian3hm/siphon/releases/latest).
 2. Open it and drag Siphon onto Applications. Or simply open Siphon inside the
    image: it offers to move itself into the Applications folder, starts again
@@ -211,16 +212,29 @@ while it is open.
    arrives in Siphon instead of the browser's download bar. If Siphon cannot
    be started, the browser downloads as usual.
 
-After an update of Siphon, press the reload arrow on the extension's card.
+From version 0.4 the extension keeps itself current: when Siphon has been
+updated it loads itself again from that folder. (Coming from an older
+version, press the reload arrow on the extension's card once.)
+
+### One button per video, and the quality you pick
+
+<img src="docs/screenshots/12-quality-menu.png" alt="A feed of posts: the Download button sits on the video under the pointer, and its menu lists that post's qualities with their sizes under the post's own name" width="100%">
+
+The button sits on the video you are looking at: the one under the pointer,
+else the one playing. On a feed with many videos it belongs to that one post.
+Its menu lists the qualities that video comes in, with their sizes. The one
+you pick is what Siphon starts downloading, at once, under a name made from
+who posted it and what they wrote, not from the scrambled address of a
+stream. The <kbd>×</kbd> hides the button for that video.
 
 <table>
 <tr>
-<td width="62%"><img src="docs/screenshots/09-video-button.png" alt="A Download this video button that the extension places at the top right corner of a video player"></td>
+<td width="62%"><img src="docs/screenshots/09-video-button.png" alt="The Download button at the top right corner of a video player"></td>
 <td width="38%"><img src="docs/screenshots/10-extension-popup.png" alt="The extension's popup: capture switches, the media found on the page and a button to grab all links"></td>
 </tr>
 <tr>
-<td valign="top">On a page where a video or stream was noticed, a download button appears by the player.</td>
-<td valign="top">The popup lists the same media, and switches capture off for a site, a file type or small files.</td>
+<td valign="top">A video that is a plain file has nothing to choose: one click sends it.</td>
+<td valign="top">The popup lists what a page's own requests gave away, and switches capture off for a site, a file type or small files.</td>
 </tr>
 </table>
 
@@ -247,7 +261,19 @@ allow-list is known in advance and nothing has to be pasted anywhere.
 
 ## YouTube and other video pages
 
-The download button also appears on YouTube watch and Shorts pages.
+On these sites the button reads the page of the video itself, so it knows the
+video's name, its length and every quality it comes in:
+
+| | |
+|---|---|
+| **YouTube** | watch pages, Shorts, previews in lists, embedded players |
+| **X (Twitter)** | each post in the timeline; a post with several videos by number |
+| **Facebook** | videos, reels, the watch page, posts in the feed |
+| **Instagram** | reels and posts |
+| **Reddit** | posts in a feed and on their own page |
+| **TikTok** | videos on their own page and in the feed |
+| **Vimeo, Dailymotion, Twitch, Streamable** | video pages and embedded players |
+| **Any other site** | a post whose date links to the post, the convention most feeds follow; otherwise the files and streams the page itself requests |
 
 Finding the streams behind such a page is left to
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), which has to be installed:
@@ -256,15 +282,27 @@ Finding the streams behind such a page is left to
 brew install yt-dlp ffmpeg
 ```
 
-Siphon then downloads picture and sound with its own engine, in small ranged
-requests as the site expects, and joins them with `ffmpeg`. The add dialog
-offers the available qualities, from 2160p down to sound only; the default is
-1080p (Settings → General). A stream address that expires mid-download is
-looked up again once, by itself. **Settings → Browser** tells you whether both
-tools were found.
+Siphon then downloads with its own engine. Where a site keeps picture and
+sound apart it fetches both, in small ranged requests as the site expects,
+and joins them with `ffmpeg`. Where a site only streams (HLS), the stream
+engine takes the rendition of the quality you picked. A stream address that
+expires mid-download is looked up again once, by itself.
+
+**Quality.** The menu by the player, the dialog in Siphon and the setting
+(Settings → General, 1080p by default) all speak of the same thing: the
+picture's short side, so an upright 1080×1920 video is 1080p. Sizes marked
+`≈` are worked out from bitrate and length where a site does not state them;
+the real size replaces the estimate as soon as the download starts.
+
+**Signed-in pages.** Siphon reads a page logged out first. Only when the
+site refuses that (Reddit usually does, private groups always do) is the page
+read again with the cookies your browser handed over for it. They are written
+to a file only you can read, for the seconds the reading takes. This can be
+switched off under Settings → General, and it never happens for YouTube.
 
 Plain HLS streams (`.m3u8`) need neither tool: Siphon assembles them itself,
-and uses `ffmpeg`, when present, only to repackage the result as MP4.
+offers their qualities the same way, and uses `ffmpeg`, when present, only to
+repackage the result as MP4.
 
 DRM-protected streams and live streams are refused. Download only what you
 have the right to download.
@@ -327,7 +365,7 @@ bridge that performs the connection-level handshake.
 
 ## What has been verified, and what has not
 
-**Verified by the test suite** (`cargo test --workspace`, 197 tests) against
+**Verified by the test suite** (`cargo test --workspace`, 208 tests) against
 local servers: segmentation and stealing, pause and resume, recovery after a
 kill between checkpoints, expired links and link swapping, changed files,
 servers without ranges or sizes, dropped connections, connection caps, the
@@ -341,7 +379,12 @@ source attributes, server date, command), checksums against published test
 vectors, the ZIP listing (including ZIP64), the link grabber at depths 0 to 2,
 the wait for a fresh link, series patterns, the sleep hold, and the command
 line; video pages end to end against a stand-in resolver, including a stream
-address that expires mid-download; browser detection, the helper's
+address that expires mid-download, a quality chosen before the download
+exists, a page that is read once for the menu and the download, a page that
+wants a login (read logged out first, then with cookies, never for YouTube,
+the cookie file gone afterwards), sites that only stream, and the shapes X
+and Facebook describe their videos in; streams fetched in a chosen quality;
+browser detection, the helper's
 registration, the saved extension folder and the store pointer; the copy into
 the Applications folder (replacing an older copy, failing safely); and
 drawing an application's icon.
@@ -357,11 +400,22 @@ cargo test -p siphon-core --test workflow real_video -- --ignored
 ```
 
 **Verified with a real Chromium** (`node scripts/e2e-extension.mjs <chromium>`,
-27 checks): download interception, the helper starting the application,
+40 checks): download interception, the helper starting the application,
 cookies, referrer and user agent hand-over, stream detection and the popup,
 Alt held while clicking, a file type and a site left to the browser, the
-download button by a video and the download it starts, and a page's links
-reaching the link picker.
+download button by a video and the download it starts, a page's links
+reaching the link picker; and on a feed of posts: the button on the video
+under the pointer, its menu under that post's name with that post's
+qualities and sizes, the picked quality being the file that arrives, the
+page read once, no other post touched, the button following the pointer; a
+post found by its own address in markup built like X's (also the second
+video of a post, and no button on a video without a post); a player two
+shadow trees deep.
+
+**Verified against the real sites**, in a throwaway browser, reading page
+descriptions only: on a YouTube watch page and on a public Facebook video
+page the button appears on the player and its menu lists the video's
+qualities with sizes under the video's own name.
 
 **Verified by hand on the Mac that built it:** the disk image mounts and
 passes `hdiutil verify`; the application inside is validly signed, knows it is
@@ -370,6 +424,16 @@ Intel slice (the latter under Rosetta); a Chromium browser asked to open its
 extensions page opens it.
 
 **Not verified**, stated plainly:
+
+- **X, Instagram, Reddit and TikTok in a real browser.** X refuses a
+  throwaway test browser outright and the others show little without an
+  account, so their rules were written from how those sites mark up a post
+  and, for X, tried against a stand-in page. What yt-dlp makes of public X
+  posts was checked; Reddit asked for a login, which is the case the cookie
+  fallback is for.
+- **The extension loading itself again after an update** is one call to the
+  browser and a guard against doing it twice; it has not been watched across
+  a real update yet.
 
 - **The installer on another Mac.** Developer ID signing and notarisation are
   in the build scripts but were not exercised: they need an Apple developer
@@ -519,11 +583,12 @@ Privacy & Security**, scroll down to the message about Siphon and press
 </details>
 
 <details>
-<summary><b>Can it download YouTube videos?</b></summary>
+<summary><b>Can it download videos from YouTube, X, Facebook, Instagram or Reddit?</b></summary>
 
 <br>
 
-Yes, with `yt-dlp` and `ffmpeg` installed. See
+Yes, with `yt-dlp` and `ffmpeg` installed: a button on each video lists its
+qualities, and the one you pick is downloaded. See
 [YouTube and other video pages](#youtube-and-other-video-pages).
 
 </details>

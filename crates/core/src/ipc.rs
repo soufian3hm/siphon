@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 use crate::disk::write_atomic;
 use crate::grab::LinkBatch;
-use crate::manager::{Capture, Manager, NewDownload};
+use crate::manager::{Capture, Manager, NewDownload, PageInfo};
 use crate::types::Request;
 
 pub const ENDPOINT_FILE: &str = "endpoint.json";
@@ -80,6 +80,9 @@ pub enum Message {
         #[serde(default)]
         ask: bool,
     },
+    /// What does this video page offer? Answered with a [`PageInfo`]; nothing
+    /// is downloaded.
+    Describe { request: Request },
     /// Start (`true`) or stop the queue of deferred downloads.
     Queue { start: bool },
     /// Bring the window forward.
@@ -108,15 +111,18 @@ pub struct Reply {
     /// The application's process, for that purpose.
     #[serde(default)]
     pub pid: u32,
+    /// The answer to [`Message::Describe`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageInfo>,
 }
 
 impl Reply {
     fn ok(attention: bool) -> Self {
-        Self { ok: true, error: None, version: Some(env!("CARGO_PKG_VERSION").into()), attention, pid: std::process::id() }
+        Self { ok: true, error: None, version: Some(env!("CARGO_PKG_VERSION").into()), attention, pid: std::process::id(), page: None }
     }
 
     fn error(message: impl Into<String>) -> Self {
-        Self { ok: false, error: Some(message.into()), version: None, attention: false, pid: 0 }
+        Self { ok: false, error: Some(message.into()), version: None, attention: false, pid: 0, page: None }
     }
 }
 
@@ -185,6 +191,15 @@ pub fn serve(manager: &std::sync::Arc<Manager>) -> std::io::Result<Endpoint> {
                             }
                             Ok(envelope) => match manager.upgrade() {
                                 None => Reply::error("the application is shutting down"),
+                                // Reading a page takes seconds and has an
+                                // answer of its own.
+                                Some(manager) if matches!(envelope.message, Message::Describe { .. }) => {
+                                    let Message::Describe { request } = envelope.message else { unreachable!("matched above") };
+                                    match manager.describe_page(&request).await {
+                                        Ok(page) => Reply { page: Some(page), ..Reply::ok(false) },
+                                        Err(e) => Reply::error(e.to_string()),
+                                    }
+                                }
                                 Some(manager) => {
                                     let settings = manager.settings();
                                     let asks = !settings.save_automatically && settings.focus_on_capture;
@@ -192,7 +207,7 @@ pub fn serve(manager: &std::sync::Arc<Manager>) -> std::io::Result<Endpoint> {
                                         Message::Raise | Message::Links { .. } => true,
                                         Message::Capture { .. } => asks,
                                         Message::Add { ask, .. } => *ask && asks,
-                                        Message::Ping | Message::Queue { .. } => false,
+                                        Message::Ping | Message::Queue { .. } | Message::Describe { .. } => false,
                                     };
                                     dispatch(&manager, envelope.message);
                                     Reply::ok(attention)
@@ -216,7 +231,8 @@ pub fn serve(manager: &std::sync::Arc<Manager>) -> std::io::Result<Endpoint> {
 /// found no running application and became it.
 pub fn dispatch(manager: &Manager, message: Message) {
     match message {
-        Message::Ping => {}
+        // Answered where it is received: it has a reply of its own.
+        Message::Ping | Message::Describe { .. } => {}
         Message::Capture { capture } => manager.capture(capture),
         Message::Links { batch } => manager.offer_links(batch),
         Message::Add { request, name, ask: true, .. } => manager.capture(Capture { request, suggested_name: name, ..Default::default() }),
@@ -259,6 +275,11 @@ pub enum SendError {
 /// Blocking and dependency-free on purpose: this is what the small
 /// native-messaging host and the single-instance check use.
 pub fn send(data_dir: &Path, message: &Message) -> Result<Reply, SendError> {
+    send_within(data_dir, message, Duration::from_secs(5))
+}
+
+/// [`send`], for a request whose answer takes a while to work out.
+pub fn send_within(data_dir: &Path, message: &Message, patience: Duration) -> Result<Reply, SendError> {
     let endpoint = Endpoint::load(data_dir).ok_or(SendError::NotRunning)?;
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
     let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
@@ -266,7 +287,7 @@ pub fn send(data_dir: &Path, message: &Message) -> Result<Reply, SendError> {
         // A stale file from a run that did not exit cleanly.
         Err(_) => return Err(SendError::NotRunning),
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(patience))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.set_nodelay(true)?;
 
