@@ -563,12 +563,19 @@
     main?.setAttribute("aria-expanded", "false");
   }
 
-  /** Asks Siphon what a page offers; one request per address at a time. */
-  function describe(page) {
+  /**
+   * Asks Siphon what a page offers; one request per address at a time.
+   * Only a click (`launch`) may start Siphon; a hover only asks a running one.
+   */
+  function describe(page, launch = false) {
     const kept = known.get(page.url);
-    if (kept && (kept.pending || Date.now() - kept.at < 180_000)) return kept.promise;
-    const entry = { pending: true, at: Date.now(), promise: null };
-    entry.promise = send({ type: "describe", url: page.url, referer: TOP ? undefined : document.referrer || undefined }).then((reply) => {
+    if (kept && (kept.pending || Date.now() - kept.at < 180_000)) {
+      // A hover's question may have found Siphon closed; the click asks again.
+      if (launch && !kept.launch) return kept.promise.then((reply) => (reply?.ok ? reply : describe(page, true)));
+      return kept.promise;
+    }
+    const entry = { pending: true, at: Date.now(), promise: null, launch };
+    entry.promise = send({ type: "describe", url: page.url, referer: TOP ? undefined : document.referrer || undefined, launch }).then((reply) => {
       entry.pending = false;
       entry.at = Date.now();
       // A refusal is asked again next time: the user may have signed in since.
@@ -608,7 +615,7 @@
       return;
     }
     renderLoading(page);
-    const reply = await describe(page);
+    const reply = await describe(page, true);
     if (!open || shown?.video !== video) return;
     if (reply.ok && reply.page?.variants?.length > 0) renderQualities(page, reply.page);
     else renderLoose(loose(video), video, reply.error || "Siphon could not read this page.", page);

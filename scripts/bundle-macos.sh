@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds dist/Siphon.app: the application, its browser helper, its icon and
+# Builds dist/app.noindex/Siphon.app: the application, its browser helper, its icon and
 # a copy of the extension.
 #
 #   scripts/bundle-macos.sh
@@ -17,7 +17,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-APP="dist/Siphon.app"
+APP="dist/app.noindex/Siphon.app"
+# Outside Spotlight (.noindex), so the build never shows up as a second Siphon.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BINARIES=(siphon siphon-host)
 

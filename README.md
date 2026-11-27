@@ -61,7 +61,7 @@ Siphon is that way of working, built for the Mac from scratch:
 
 ## Install
 
-1. Download **`Siphon-0.4.0.dmg`** from the
+1. Download **`Siphon-0.4.1.dmg`** from the
    [latest release](https://github.com/soufian3hm/siphon/releases/latest).
 2. Open it and drag Siphon onto Applications. Or simply open Siphon inside the
    image: it offers to move itself into the Applications folder, starts again
@@ -486,7 +486,7 @@ Requires Rust 1.100 or later and the Xcode command line tools.
 git clone https://github.com/soufian3hm/siphon.git
 cd siphon
 scripts/make-dmg.sh            # release build → dist/Siphon-<version>.dmg
-scripts/bundle-macos.sh        # only the application → dist/Siphon.app
+scripts/bundle-macos.sh        # only the application → dist/app.noindex/Siphon.app
 ```
 
 During development: `cargo run -p siphon`. Tests: `cargo test --workspace`.

@@ -212,10 +212,11 @@ async function pageRequest(url, referer) {
 /** What Siphon found behind a page, kept briefly: the menu is opened twice. */
 const described = new Map();
 
-async function describePage(url, referer) {
+/** Siphon is started for this only when `launch` says the user clicked. */
+async function describePage(url, referer, launch) {
   const kept = described.get(url);
   if (kept && Date.now() - kept.at < 180_000) return kept.page;
-  const reply = await ask({ type: "describe", request: await pageRequest(url, referer) }, DESCRIBE_TIMEOUT_MS);
+  const reply = await ask({ type: "describe", request: await pageRequest(url, referer), launch: launch === true }, DESCRIBE_TIMEOUT_MS);
   if (!reply.ok || !reply.page) throw new Error(reply.error || "Siphon could not read this page.");
   described.set(url, { at: Date.now(), page: reply.page });
   if (described.size > 60) described.delete(described.keys().next().value);
@@ -679,7 +680,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       // From the page script: what does the page of this video offer?
       case "describe": {
         if (!/^https?:\/\//i.test(message.url ?? "")) throw new Error("That is not a page.");
-        return { page: await describePage(message.url, message.referer) };
+        return { page: await describePage(message.url, message.referer, message.launch) };
       }
       case "grab": {
         const tabId = Number.isInteger(message.tabId) ? message.tabId : (await activeTab())?.id;

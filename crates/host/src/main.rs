@@ -43,6 +43,10 @@ struct Incoming {
     /// A video page to describe.
     #[serde(default)]
     request: Option<Request>,
+    /// Set only when the user clicked: a describe may then start the
+    /// application. Otherwise (a hover, a prefetch) it only asks a running one.
+    #[serde(default)]
+    launch: bool,
 }
 
 fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
@@ -174,7 +178,7 @@ fn handle(incoming: Incoming) -> Value {
         },
         // The application reads the page; its answer is the qualities.
         "describe" => match incoming.request {
-            Some(request) if !request.url.trim().is_empty() => deliver(&Message::Describe { request }, true, PAGE_PATIENCE),
+            Some(request) if !request.url.trim().is_empty() => deliver(&Message::Describe { request }, incoming.launch, PAGE_PATIENCE),
             _ => Err("there is no page to describe".into()),
         },
         "raise" => deliver(&Message::Raise, true, PATIENCE),
@@ -285,14 +289,14 @@ mod tests {
 
     #[test]
     fn unknown_requests_are_answered_not_fatal() {
-        let reply = handle(Incoming { id: json!(3), kind: "dance".into(), capture: None, links: None, request: None });
+        let reply = handle(Incoming { id: json!(3), kind: "dance".into(), capture: None, links: None, request: None, launch: false });
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["id"], 3);
-        let reply = handle(Incoming { id: Value::Null, kind: "capture".into(), capture: None, links: None, request: None });
+        let reply = handle(Incoming { id: Value::Null, kind: "capture".into(), capture: None, links: None, request: None, launch: false });
         assert_eq!(reply["ok"], false);
-        let reply = handle(Incoming { id: Value::Null, kind: "links".into(), capture: None, links: Some(LinkBatch::default()), request: None });
+        let reply = handle(Incoming { id: Value::Null, kind: "links".into(), capture: None, links: Some(LinkBatch::default()), request: None, launch: false });
         assert_eq!(reply["ok"], false);
-        let reply = handle(Incoming { id: json!("d1"), kind: "describe".into(), capture: None, links: None, request: None });
+        let reply = handle(Incoming { id: json!("d1"), kind: "describe".into(), capture: None, links: None, request: None, launch: false });
         assert_eq!((reply["ok"].clone(), reply["id"].clone()), (json!(false), json!("d1")));
     }
 

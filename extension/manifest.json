@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Siphon",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Hands downloads and media streams to the Siphon download manager.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnxFAwScIUk5L8WrAx4nJSLaMPrNuZD5/4qJFBGhksaADqiAyRBjKx8GjMsODXbKhubEEJUXulLAMaGaJFUgFrkfv9gus8zYTKXr5vcEtCcK9LUMIgXhJ3zi8Ypduxzd8vp1BTVdHxkplqNKGPivuU3XgZlcr6ytvbhc2iLwx6AqFEcXuorvXd7x1+TevowQs/YIvfeLaNpcVK3pbkaREBBNHL729tu4Se1tK/3hzBZ+GbaCLZwQSvchFtDYQSQXiOuHg0YwmyQPDy2lLnkQhatvqLGVS34Qdm5JQHjbvXNLaVLZxOu5lsCFF3pa/p+EhAJS9JCdQjMD8+De2IqlRnQIDAQAB",
   "minimum_chrome_version": "116",

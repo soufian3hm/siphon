@@ -5021,7 +5021,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "siphon"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "eframe",
  "egui",
@@ -5034,7 +5034,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -5071,7 +5071,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-host"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5080,7 +5080,7 @@ dependencies = [
 
 [[package]]
 name = "siphon-testserver"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "parking_lot 0.13.0",
  "tokio",

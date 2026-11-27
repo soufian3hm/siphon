@@ -3,7 +3,7 @@
 # Siphon.app and a shortcut to the Applications folder.
 #
 #   scripts/make-dmg.sh              build the application, then the image
-#   scripts/make-dmg.sh --no-build   wrap the dist/Siphon.app that is there
+#   scripts/make-dmg.sh --no-build   wrap the dist/app.noindex/Siphon.app that is there
 #
 # Opened on another Mac, an image that is not notarised is stopped by
 # Gatekeeper. With a Developer ID identity in SIPHON_SIGN_IDENTITY (see
@@ -18,7 +18,7 @@ if [[ "${1:-}" != "--no-build" ]]; then
   scripts/bundle-macos.sh
 fi
 
-APP="dist/Siphon.app"
+APP="dist/app.noindex/Siphon.app"
 [[ -d "$APP" ]] || { echo "no $APP: run scripts/bundle-macos.sh first" >&2; exit 1; }
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
 DMG="dist/Siphon-$VERSION.dmg"
